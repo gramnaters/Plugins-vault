@@ -1,12 +1,12 @@
 {
   "name": "Plugins-Vault",
-  "version": "1.0.0",
+  "version": "2.2.0",
   "scrapers": [
     {
       "id": "netmirror-fixed",
       "name": "NetMirror (Fixed)",
       "description": "Stream movies and TV shows from Netflix, Prime Video, Hotstar, and Disney+ via NetMirror API with dynamic domain rotation.",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "author": "gramnaters",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/netmirror-fixed.js",
