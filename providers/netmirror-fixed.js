@@ -1,66 +1,63 @@
-/**
+ /**
  * NetMirror Scraper - FIXED VERSION
- * Dynamic domain resolution with multiple fallback endpoints
- * Supports Netflix, Prime Video, Hotstar, Disney+
+ * Stream movies and TV shows from Netflix, Prime Video, Hotstar, and Disney+
+ * via NetMirror API with dynamic domain rotation.
  *
- * FIXES APPLIED (vs original by gramnaters):
- *   1. CRITICAL: player.php status check — API returns "otp" not "ok",
- *      but video_link is present in both cases. Now checks video_link
- *      presence instead of status === "ok".
- *   2. CRITICAL: Season number assignment — postData.episodes belong to
- *      the SELECTED season (often S5), not always S1. Now uses the
- *      selected season index from postData.season[].
- *   3. MAJOR: Skip the selected season when iterating postData.season
- *      to avoid duplicate episode fetching and wrong season numbers.
+ * This version matches the yoruix scraper pattern (confirmed working in NuvioMobile):
+ *   - Uses fetch() and response.json() directly (no fetchWithTimeout wrapper)
+ *   - No AbortController (NuvioMobile's fetch is synchronous via __native_fetch)
+ *   - Simple cached resolveApiUrl (no shared promise pattern)
+ *
+ * BUG FIXES vs original gramnaters version:
+ *   1. CRITICAL: player.php returns status="otp" not "ok", but video_link is
+ *      present. Now checks video_link instead of status === "ok".
+ *   2. CRITICAL: postData.episodes belong to SELECTED season (often S5), not
+ *      always S1. Now uses selected season index from postData.season[].
+ *   3. MAJOR: Skip selected season when iterating to avoid duplicate episodes.
  *   4. MINOR: Fixed base64 typo for mobidetect.pro (had trailing quote).
- *   5. MINOR: fetchWithTimeout now handles non-JSON responses gracefully
- *      (e.g. Cloudflare 403 HTML) instead of throwing parse errors.
- *   6. MINOR: Added User-Agent + Origin to stream headers for better
- *      external player compatibility.
- *   7. MINOR: Race condition in resolveApiUrl — multiple parallel calls
- *      no longer trigger redundant domain resolution.
+ *   5. MINOR: Added User-Agent + Origin to stream headers for player compatibility.
  */
 
-console.log('[NetMirror] Initializing NetMirror provider (fixed v2.1.0)');
+console.log('[NetMirror] Initializing NetMirror provider (fixed v2.2.0)');
 
-const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
+var TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 
 // Dynamic domain pool (base64 encoded, rotates if one fails)
-const DOMAIN_POOL = [
-    "aHR0cHM6Ly9tb2JpbGVkZXRlY3RzLmNvbQ==",        // mobiledetects.com
-    "aHR0cHM6Ly9tb2JpbGVkZXRlY3QuYXBw",           // mobiledetect.app
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmFydA==",           // mobidetect.art
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmNj",               // mobidetect.cc
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmNsaWNr",          // mobidetect.click
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0Lmluaw==",          // mobidetect.ink
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmxpdmU=",          // mobidetect.live
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnBybw==",          // mobidetect.pro  (FIXED: was "byI=" with trailing quote)
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnNob3A=",          // mobidetect.shop
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnNpdGU=",          // mobidetect.site
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnNwYWNl",         // mobidetect.space
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnN0b3Jl",         // mobidetect.store
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnZpcA==",         // mobidetect.vip
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0Lndpa2k=",         // mobidetect.wiki
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0Lnh5eg==",         // mobidetect.xyz
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5hcnQ=",         // mobidetects.art
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5jYw==",         // mobidetects.cc
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5pbmZv",        // mobidetects.info
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5pbms=",        // mobidetects.ink
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5saXZl",       // mobidetects.live
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5wcm8=",       // mobidetects.pro
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5zdG9yZQ==",   // mobidetects.store
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy50b3A=",       // mobidetects.top
-    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy54eXo="        // mobidetects.xyz
+var DOMAIN_POOL = [
+    "aHR0cHM6Ly9tb2JpbGVkZXRlY3RzLmNvbQ==",
+    "aHR0cHM6Ly9tb2JpbGVkZXRlY3QuYXBw",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmFydA==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmNj",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmNsaWNr",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0Lmluaw==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LmxpdmU=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnBybw==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnNob3A=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnNpdGU=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnNwYWNl",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnN0b3Jl",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0LnZpcA==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0Lndpa2k=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0Lnh5eg==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5hcnQ=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5jYw==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5pbmZv",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5pbms=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5saXZl",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5wcm8=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy5zdG9yZQ==",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy50b3A=",
+    "aHR0cHM6Ly9tb2JpZGV0ZWN0cy54eXo="
 ];
 
-const PLATFORM_MAP = {
+var PLATFORM_MAP = {
     netflix: { ott: "nf" },
     primevideo: { ott: "pv" },
     hotstar: { ott: "hs" },
     disney: { ott: "hs" }
 };
 
-const NEW_TV_BASE_HEADERS = {
+var NEW_TV_BASE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
     "Pragma": "no-cache",
     "Expires": "0",
@@ -69,67 +66,51 @@ const NEW_TV_BASE_HEADERS = {
     "Accept": "application/json, text/plain, */*"
 };
 
-// Stream playback headers — sent to the video player
-const STREAM_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+var STREAM_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
-let resolvedApiUrl = null;
-let apiResolutionTimestamp = 0;
-const API_CACHE_EXPIRY = 3600000; // 1 hour
+var resolvedApiUrl = null;
+var apiResolutionTimestamp = 0;
+var API_CACHE_EXPIRY = 3600000;
 
-// FIX #7: Pending promise to prevent race conditions in parallel resolveApiUrl calls
-let resolveApiUrlPromise = null;
-
-// Base64 decode
 function safeAtob(encoded) {
     try {
         if (typeof atob === "function") {
             return atob(encoded);
         }
-        // Fallback for Node.js / QuickJS without atob
         if (typeof Buffer !== "undefined") {
             return Buffer.from(encoded, "base64").toString("binary");
         }
-        throw new Error("No base64 decoder available");
+        return null;
     } catch (e) {
-        console.error('[NetMirror] Base64 decode error:', e.message);
         return null;
     }
 }
 
 // Resolve the actual API URL from dynamic domains
-// FIX #7: Returns a shared promise if resolution is already in progress
 function resolveApiUrl() {
-    // Check cache
-    const now = Date.now();
-    if (resolvedApiUrl && apiResolutionTimestamp && (now - apiResolutionTimestamp) < API_CACHE_EXPIRY) {
-        return Promise.resolve(resolvedApiUrl);
-    }
-    // If resolution is already in flight, return the same promise
-    if (resolveApiUrlPromise) {
-        return resolveApiUrlPromise;
-    }
+    return new Promise(function(resolve, reject) {
+        var now = Date.now();
+        if (resolvedApiUrl && apiResolutionTimestamp && (now - apiResolutionTimestamp) < API_CACHE_EXPIRY) {
+            return resolve(resolvedApiUrl);
+        }
 
-    console.log('[NetMirror] Resolving API URL from domains...');
-    resolveApiUrlPromise = new Promise(function(resolve, reject) {
-        let domainIndex = 0;
+        var domainIndex = 0;
 
         function tryNextDomain() {
             if (domainIndex >= DOMAIN_POOL.length) {
-                console.error('[NetMirror] All domains exhausted, could not resolve API');
-                resolveApiUrlPromise = null;
-                return reject(new Error("Failed to resolve API URL from any domain"));
+                return reject(new Error("Failed to resolve API URL"));
             }
 
-            const encoded = DOMAIN_POOL[domainIndex];
-            const base = safeAtob(encoded);
+            var encoded = DOMAIN_POOL[domainIndex];
+            var base = safeAtob(encoded);
 
             if (!base) {
                 domainIndex++;
                 return tryNextDomain();
             }
 
-            const domain = base.replace(/\/$/, "");
-            const checkUrl = domain + "/checknewtv.php";
+            var domain = base.replace(/\/$/, "");
+            var checkUrl = domain + "/checknewtv.php";
 
             console.log('[NetMirror] Trying domain:', domain.replace(/^https:\/\//, ''));
 
@@ -137,24 +118,20 @@ function resolveApiUrl() {
                 method: 'GET',
                 headers: NEW_TV_BASE_HEADERS
             }).then(function(response) {
-                if (!response.ok) {
-                    throw new Error('HTTP ' + response.status);
-                }
                 return response.json();
             }).then(function(data) {
                 if (data && data.token_hash) {
-                    const decodedUrl = safeAtob(data.token_hash);
+                    var decodedUrl = safeAtob(data.token_hash);
                     if (decodedUrl) {
                         resolvedApiUrl = decodedUrl.replace(/\/$/, "");
                         apiResolutionTimestamp = Date.now();
-                        console.log('[NetMirror] API URL resolved:', resolvedApiUrl.replace(/^https:\/\//, ''));
-                        resolveApiUrlPromise = null;
+                        console.log('[NetMirror] API URL resolved:', resolvedApiUrl);
                         return resolve(resolvedApiUrl);
                     }
                 }
-                throw new Error("No token_hash in response");
+                domainIndex++;
+                tryNextDomain();
             }).catch(function(error) {
-                console.log('[NetMirror] Domain failed:', error.message);
                 domainIndex++;
                 tryNextDomain();
             });
@@ -162,71 +139,28 @@ function resolveApiUrl() {
 
         tryNextDomain();
     });
-
-    return resolveApiUrlPromise;
 }
 
-// Build headers with OTT identifier
 function buildHeaders(ott, extra) {
     extra = extra || {};
-    const headers = {};
-    for (const key in NEW_TV_BASE_HEADERS) {
+    var headers = {};
+    for (var key in NEW_TV_BASE_HEADERS) {
         headers[key] = NEW_TV_BASE_HEADERS[key];
     }
     headers["Ott"] = ott;
-    for (const key in extra) {
+    for (var key in extra) {
         headers[key] = extra[key];
     }
     return headers;
 }
 
-// FIX #5: Fetch with timeout + graceful non-JSON handling
-function fetchWithTimeout(url, options) {
-    options = options || {};
-    var timeoutMs = options.timeout || 15000;
-
-    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    var timeoutId = controller ? setTimeout(function() {
-        controller.abort();
-    }, timeoutMs) : null;
-
-    var fetchOptions = {
-        method: options.method || 'GET',
-        headers: options.headers || {}
-    };
-
-    if (controller) {
-        fetchOptions.signal = controller.signal;
-    }
-
-    return fetch(url, fetchOptions).then(function(response) {
-        if (timeoutId) clearTimeout(timeoutId);
-        // FIX: Don't auto-parse JSON — check content-type first
-        var ct = response.headers.get('content-type') || '';
-        if (response.ok && ct.indexOf('application/json') !== -1) {
-            return response.json().then(function(data) {
-                return { ok: true, data: data, status: response.status };
-            });
-        }
-        // Non-JSON or non-OK — return text so caller can decide
-        return response.text().then(function(text) {
-            return { ok: response.ok, data: null, status: response.status, text: text };
-        });
-    }).catch(function(error) {
-        if (timeoutId) clearTimeout(timeoutId);
-        console.error('[NetMirror] Fetch error:', error.message);
-        throw error;
-    });
-}
-
-// FIX #2 & #3: Get all episodes with correct season numbers
-// - postData.episodes belong to the SELECTED season (find its index, not always S1)
-// - Skip the selected season when iterating postData.season (avoid duplicates)
+// Get all episodes for a TV show
+// FIX #2: Use selected season index for postData.episodes (not hardcoded S1)
+// FIX #3: Skip selected season when iterating to avoid duplicates
 function getAllEpisodes(contentId, postData, platform, apiBase) {
     return new Promise(function(resolve) {
         var episodes = [];
 
-        // Process a list of episode objects into {id, s, ep}
         function processEpisodes(episodeList, seasonNum) {
             if (!episodeList) return;
             for (var i = 0; i < episodeList.length; i++) {
@@ -250,29 +184,29 @@ function getAllEpisodes(contentId, postData, platform, apiBase) {
             }
         }
 
-        // FIX #2: Find the selected season index — postData.episodes belong to it
+        // FIX #2: Find the selected season index
         var selectedSeasonIdx = -1;
         var selectedSeasonNum = 1;
         if (postData.season && postData.season.length > 0) {
             for (var i = 0; i < postData.season.length; i++) {
                 if (postData.season[i] && postData.season[i].selected) {
                     selectedSeasonIdx = i;
-                    selectedSeasonNum = i + 1; // season number is 1-indexed
+                    selectedSeasonNum = i + 1;
                     break;
                 }
             }
         }
 
-        // Process postData.episodes with the SELECTED season number (not hardcoded 1)
+        // Process postData.episodes with the SELECTED season number
         if (postData.episodes) {
             processEpisodes(postData.episodes, selectedSeasonNum);
         }
 
-        // FIX #3: Iterate remaining seasons (skip the selected one to avoid duplicates)
+        // FIX #3: Iterate remaining seasons (skip selected to avoid duplicates)
         if (postData.season && postData.season.length > 0) {
             var seasonsToFetch = [];
             for (var j = 0; j < postData.season.length; j++) {
-                if (j === selectedSeasonIdx) continue; // skip selected
+                if (j === selectedSeasonIdx) continue;
                 if (!postData.season[j] || !postData.season[j].id) continue;
                 seasonsToFetch.push({ season: postData.season[j], idx: j });
             }
@@ -286,11 +220,14 @@ function getAllEpisodes(contentId, postData, platform, apiBase) {
 
             seasonsToFetch.forEach(function(item) {
                 var url = apiBase + "/newtv/episodes.php?id=" + item.season.id + "&page=1";
-                fetchWithTimeout(url, {
+                fetch(url, {
+                    method: 'GET',
                     headers: buildHeaders(platform.ott)
                 }).then(function(response) {
-                    if (response.ok && response.data && response.data.episodes) {
-                        processEpisodes(response.data.episodes, item.idx + 1);
+                    return response.json();
+                }).then(function(data) {
+                    if (data && data.episodes) {
+                        processEpisodes(data.episodes, item.idx + 1);
                     }
                     seasonsProcessed++;
                     if (seasonsProcessed === totalSeasons) {
@@ -309,6 +246,30 @@ function getAllEpisodes(contentId, postData, platform, apiBase) {
     });
 }
 
+// FIX #1: Accept video_link presence (not status === "ok")
+// FIX #6: Include User-Agent + Origin in stream headers
+function buildStreamResult(platformKey, title, playerData, season, episode) {
+    if (!playerData || !playerData.video_link) {
+        return null;
+    }
+    var nameLabel = platformKey.charAt(0).toUpperCase() + platformKey.slice(1);
+    var streamTitle = title;
+    if (season !== null && season !== undefined && episode !== null && episode !== undefined) {
+        streamTitle = title + ' Â· S' + season + 'E' + episode;
+    }
+    return {
+        name: "NetMirror (" + nameLabel + ")",
+        title: streamTitle,
+        url: playerData.video_link,
+        quality: "Auto",
+        headers: {
+            "Referer": playerData.referer || "https://net52.cc",
+            "User-Agent": STREAM_USER_AGENT,
+            "Origin": "https://net52.cc"
+        }
+    };
+}
+
 // Fetch streams from a platform
 function fetchFromPlatform(platformKey, title, mediaType, season, episode) {
     return new Promise(function(resolve) {
@@ -318,42 +279,46 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode) {
 
             console.log('[NetMirror] Searching ' + platformKey + ' for: ' + title);
 
-            return fetchWithTimeout(searchUrl, {
+            return fetch(searchUrl, {
+                method: 'GET',
                 headers: buildHeaders(platform.ott)
             }).then(function(response) {
-                if (!response.ok || !response.data || !response.data.searchResult || response.data.searchResult.length === 0) {
+                return response.json();
+            }).then(function(searchData) {
+                if (!searchData || !searchData.searchResult || searchData.searchResult.length === 0) {
                     console.log('[NetMirror] No results on ' + platformKey);
                     return resolve(null);
                 }
 
-                // FIX: Prefer exact title match (case-insensitive) to avoid wrong hits
+                // Prefer exact title match
                 var match = null;
                 var lowerTitle = title.toLowerCase();
-                for (var i = 0; i < response.data.searchResult.length; i++) {
-                    var r = response.data.searchResult[i];
+                for (var i = 0; i < searchData.searchResult.length; i++) {
+                    var r = searchData.searchResult[i];
                     if (r && r.t && r.t.trim().toLowerCase() === lowerTitle) {
                         match = r;
                         break;
                     }
                 }
-                if (!match) match = response.data.searchResult[0];
+                if (!match) match = searchData.searchResult[0];
 
                 var contentId = match.id;
-
                 var postUrl = apiBase + "/newtv/post.php?id=" + contentId;
-                return fetchWithTimeout(postUrl, {
+
+                return fetch(postUrl, {
+                    method: 'GET',
                     headers: buildHeaders(platform.ott, { Lastep: "", Usertoken: "" })
-                }).then(function(postResponse) {
-                    if (!postResponse.ok || !postResponse.data) {
+                }).then(function(response) {
+                    return response.json();
+                }).then(function(postData) {
+                    if (!postData) {
                         return resolve(null);
                     }
-                    var postData = postResponse.data;
                     var targetId = contentId;
 
                     if (mediaType === "tv") {
-                        // Skip if it's actually a movie (no seasons/episodes)
+                        // Skip if it's actually a movie
                         if (postData.type !== "t" && (!postData.episodes || postData.episodes.filter(function(e){return e;}).length === 0)) {
-                            console.log('[NetMirror] ' + platformKey + ' hit is a movie, not series');
                             return resolve(null);
                         }
 
@@ -369,22 +334,41 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode) {
                             }
 
                             if (!targetEp) {
-                                console.log('[NetMirror] Episode S' + season + 'E' + episode + ' not found on ' + platformKey);
+                                console.log('[NetMirror] S' + season + 'E' + episode + ' not found on ' + platformKey);
                                 return resolve(null);
                             }
 
                             targetId = targetEp.id;
-                            return fetchPlayerAndBuildStream(apiBase, platform, platformKey, targetId, title, season, episode);
+                            var playerUrl = apiBase + "/newtv/player.php?id=" + targetId;
+
+                            return fetch(playerUrl, {
+                                method: 'GET',
+                                headers: buildHeaders(platform.ott, { "Usertoken": "" })
+                            }).then(function(response) {
+                                return response.json();
+                            }).then(function(playerData) {
+                                var result = buildStreamResult(platformKey, title, playerData, season, episode);
+                                return resolve(result ? [result] : null);
+                            });
                         });
                     } else {
-                        // Movie — skip if it's actually a series
+                        // Movie â€” skip if it's actually a series
                         if (postData.type === "t" || (postData.episodes && postData.episodes.filter(function(e){return e;}).length > 0)) {
-                            console.log('[NetMirror] ' + platformKey + ' hit is a series, not movie');
                             return resolve(null);
                         }
 
                         targetId = postData.main_id || contentId;
-                        return fetchPlayerAndBuildStream(apiBase, platform, platformKey, targetId, title, null, null);
+                        var playerUrl = apiBase + "/newtv/player.php?id=" + targetId;
+
+                        return fetch(playerUrl, {
+                            method: 'GET',
+                            headers: buildHeaders(platform.ott, { "Usertoken": "" })
+                        }).then(function(response) {
+                            return response.json();
+                        }).then(function(playerData) {
+                            var result = buildStreamResult(platformKey, title, playerData, null, null);
+                            return resolve(result ? [result] : null);
+                        });
                     }
                 });
             });
@@ -395,55 +379,19 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode) {
     });
 }
 
-// FIX #1: Accept status "ok" OR "otp" — video_link is present in both cases
-// FIX #6: Include User-Agent + Origin in stream headers
-function fetchPlayerAndBuildStream(apiBase, platform, platformKey, targetId, title, season, episode) {
-    var playerUrl = apiBase + "/newtv/player.php?id=" + targetId;
-    return fetchWithTimeout(playerUrl, {
-        headers: buildHeaders(platform.ott, { "Usertoken": "" })
-    }).then(function(playerResponse) {
-        if (!playerResponse.ok || !playerResponse.data) {
-            return null;
-        }
-        var d = playerResponse.data;
-        // FIX #1: The API returns status: "otp" with video_link present.
-        // The original code checked status === "ok" which NEVER matched.
-        // Now we accept either status as long as video_link is present.
-        if (d.video_link) {
-            var nameLabel = platformKey.charAt(0).toUpperCase() + platformKey.slice(1);
-            var streamTitle = title;
-            if (season !== null && episode !== null) {
-                streamTitle = title + ' · S' + season + 'E' + episode;
-            }
-            return [{
-                name: "NetMirror (" + nameLabel + ")",
-                title: streamTitle,
-                url: d.video_link,
-                quality: "Auto",
-                headers: {
-                    "Referer": d.referer || "https://net52.cc",
-                    "User-Agent": STREAM_USER_AGENT,
-                    "Origin": "https://net52.cc"
-                }
-            }];
-        }
-        return null;
-    });
-}
-
 // Main function: Get streams
 function getStreams(tmdbId, mediaType, season, episode) {
     return new Promise(function(resolve) {
         season = season || 1;
         episode = episode || 1;
 
-        // Get title from TMDB
         var tmdbType = mediaType === "tv" ? "tv" : "movie";
         var tmdbUrl = "https://api.themoviedb.org/3/" + tmdbType + "/" + tmdbId + "?api_key=" + TMDB_API_KEY;
 
-        console.log('[NetMirror] Fetching ' + mediaType + ' info from TMDB (ID: ' + tmdbId + ')');
+        console.log('[NetMirror] Fetching ' + mediaType + ' from TMDB (ID: ' + tmdbId + ')');
 
         fetch(tmdbUrl, {
+            method: 'GET',
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "application/json"
@@ -462,26 +410,30 @@ function getStreams(tmdbId, mediaType, season, episode) {
 
             var platforms = ["netflix", "primevideo", "hotstar", "disney"];
             var foundStreams = [];
+            var platformsChecked = 0;
 
-            // Run platforms SEQUENTIALLY to avoid overwhelming slow proxies.
-            // On NuvioMobile (phones, residential IP) this is still fast because
-            // the phone's network is direct — no proxy overhead.
-            (async function() {
-                for (var pi = 0; pi < platforms.length; pi++) {
-                    var platformKey = platforms[pi];
-                    try {
-                        var streams = await fetchFromPlatform(platformKey, title, mediaType, season, episode);
-                        if (streams && streams.length > 0) {
-                            console.log('[NetMirror] Found ' + streams.length + ' streams on ' + platformKey);
-                            foundStreams = foundStreams.concat(streams);
-                        }
-                    } catch (error) {
-                        console.error('[NetMirror] Error on ' + platformKey + ':', error.message);
+            platforms.forEach(function(platformKey) {
+                fetchFromPlatform(platformKey, title, mediaType, season, episode).then(function(streams) {
+                    platformsChecked++;
+
+                    if (streams && streams.length > 0) {
+                        console.log('[NetMirror] Found ' + streams.length + ' streams on ' + platformKey);
+                        foundStreams = foundStreams.concat(streams);
                     }
-                }
-                console.log('[NetMirror] Total streams found: ' + foundStreams.length);
-                resolve(foundStreams);
-            })();
+
+                    if (platformsChecked === platforms.length) {
+                        console.log('[NetMirror] Total streams found: ' + foundStreams.length);
+                        resolve(foundStreams);
+                    }
+                }).catch(function(error) {
+                    console.error('[NetMirror] Error on ' + platformKey + ':', error.message);
+                    platformsChecked++;
+
+                    if (platformsChecked === platforms.length) {
+                        resolve(foundStreams);
+                    }
+                });
+            });
 
         }).catch(function(error) {
             console.error('[NetMirror] TMDB fetch error:', error.message);
@@ -490,4 +442,4 @@ function getStreams(tmdbId, mediaType, season, episode) {
     });
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: getStreams };
