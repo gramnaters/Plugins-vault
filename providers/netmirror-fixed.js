@@ -246,13 +246,27 @@ function getAllEpisodes(contentId, postData, platform, apiBase) {
     });
 }
 
+// =============================================================
+// WORKER PROXY URL (OPTIONAL)
+// 
+// The scraper returns the ORIGINAL m3u8 URL by default. The phone's
+// residential IP can fetch directly from all CDNs (tv.imgcdn.kim, s21, s20).
+// This is exactly how the Android TV app works.
+//
+// IF you experience rate limiting (video stops after a few minutes):
+//   1. Deploy the proxy server (server.js) on Render/Railway/VPS
+//   2. Load it with fast_proxies.json (23 tested proxies at >100KB/s)
+//   3. Set WORKER_URL below to your deployed proxy URL
+//   4. The proxy will rotate IPs per segment, avoiding per-IP rate limits
+//
+// Without WORKER_URL, the scraper returns direct URLs (fastest, may rate-limit).
+// With WORKER_URL, the scraper proxies through your server (no rate-limit, slightly slower).
+// =============================================================
+var WORKER_URL = ""; // Set to your proxy URL, e.g. "https://your-app.onrender.com"
+
 // FIX #1: Accept video_link presence (not status === "ok")
 // FIX #6: Include User-Agent + Origin in stream headers
-// FIX #8: Parse master m3u8, keep only 480p to avoid video CDN rate limiting.
-//   The video CDN (s21.freecdn4.top) returns 429 after ~50-100 rapid segment
-//   requests. 480p segments are smaller â†’ less bandwidth â†’ less rate limiting.
-//   We preserve audio + subtitle tracks so the user still gets multi-audio.
-//   Returns a data: URI containing the modified master playlist.
+// Returns ALL qualities (1080p/720p/480p) + ALL audio tracks + ALL subtitles.
 function buildStreamResult(platformKey, title, playerData, season, episode) {
     if (!playerData || !playerData.video_link) {
         return null;
@@ -263,175 +277,28 @@ function buildStreamResult(platformKey, title, playerData, season, episode) {
         streamTitle = title + ' Â· S' + season + 'E' + episode;
     }
 
-    // Return a stream that uses the original master m3u8 URL.
-    // The caller (getStreams) will post-process this to create a data: URI
-    // with only 480p quality to avoid video CDN rate limiting.
+    // Route through proxy if configured, otherwise return direct URL
+    var streamUrl = playerData.video_link;
+    var quality = "Auto (All Qualities)";
+
+    if (WORKER_URL && WORKER_URL.length > 0) {
+        streamUrl = WORKER_URL + "/proxy?url=" + encodeURIComponent(playerData.video_link);
+        console.log('[NetMirror] Routed through proxy: ' + WORKER_URL);
+    } else {
+        console.log('[NetMirror] Direct URL (residential IP â€” all qualities, all audio, all subtitles)');
+    }
+
     return {
         name: "NetMirror (" + nameLabel + ")",
         title: streamTitle,
-        url: playerData.video_link,
-        quality: "Auto",
+        url: streamUrl,
+        quality: quality,
         headers: {
             "Referer": playerData.referer || "https://net52.cc",
             "User-Agent": STREAM_USER_AGENT,
             "Origin": "https://net52.cc"
-        },
-        _referer: playerData.referer || "https://net52.cc"
+        }
     };
-}
-
-// FIX #8: Fetch master m3u8, strip high qualities (keep 480p only),
-// return as data: URI. This prevents the video CDN from rate-limiting.
-// Falls back to the original URL if anything fails.
-function optimizeStreamForRateLimit(stream) {
-    if (!stream || !stream.url || !stream.url.includes(".m3u8")) {
-        return Promise.resolve(stream);
-    }
-
-    var originalUrl = stream.url;
-    var referer = stream._referer || "https://net52.cc";
-
-    return fetch(originalUrl, {
-        method: 'GET',
-        headers: {
-            "User-Agent": STREAM_USER_AGENT,
-            "Referer": referer,
-            "Origin": "https://net52.cc",
-            "Accept": "*/*"
-        }
-    }).then(function(response) {
-        return response.text();
-    }).then(function(masterM3u8) {
-        // Check if this is actually a master playlist (has multiple qualities)
-        var streamInfCount = (masterM3u8.match(/#EXT-X-STREAM-INF/g) || []).length;
-        if (streamInfCount <= 1) {
-            // Single quality or sub-playlist â€” return original URL
-            return stream;
-        }
-
-        // Parse the master m3u8 and keep only 480p + all audio/subtitle tracks
-        var lines = masterM3u8.split("\n");
-        var modified = [];
-        var keepNextStreamUrl = false;
-        var found480 = false;
-
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-
-            // Always keep header lines
-            if (line.startsWith("#EXTM3U") || line.startsWith("#EXT-X-VERSION")) {
-                modified.push(line);
-                continue;
-            }
-
-            // Keep ALL audio and subtitle tracks (they're on a different CDN, not rate-limited)
-            if (line.startsWith("#EXT-X-MEDIA:")) {
-                modified.push(line);
-                continue;
-            }
-
-            // For stream-inf, only keep 480p (or lowest available if no 480p)
-            if (line.startsWith("#EXT-X-STREAM-INF")) {
-                if (line.includes("480")) {
-                    modified.push(line);
-                    keepNextStreamUrl = true;
-                    found480 = true;
-                } else {
-                    keepNextStreamUrl = false;
-                }
-                continue;
-            }
-
-            // Stream URL line â€” only keep if we flagged it
-            if (line.startsWith("http")) {
-                if (keepNextStreamUrl) {
-                    modified.push(line);
-                }
-                keepNextStreamUrl = false;
-                continue;
-            }
-
-            // Skip empty lines and unknown tags for non-kept streams
-            if (line && !line.startsWith("#")) {
-                // Non-URL, non-comment line â€” skip
-                continue;
-            }
-        }
-
-        // If no 480p found, keep the lowest bandwidth stream
-        if (!found480 && modified.length > 0) {
-            // Re-parse and keep the last (lowest bandwidth) stream
-            modified = [];
-            var lastStreamInf = null;
-            var lastStreamUrl = null;
-            var seenFirst = false;
-
-            for (var j = 0; j < lines.length; j++) {
-                var l = lines[j].trim();
-                if (l.startsWith("#EXTM3U") || l.startsWith("#EXT-X-VERSION")) {
-                    modified.push(l);
-                } else if (l.startsWith("#EXT-X-MEDIA:")) {
-                    modified.push(l);
-                } else if (l.startsWith("#EXT-X-STREAM-INF")) {
-                    lastStreamInf = l;
-                    lastStreamUrl = null;
-                } else if (l.startsWith("http") && lastStreamInf) {
-                    lastStreamUrl = l;
-                }
-            }
-            // Add the last (lowest bandwidth) stream
-            if (lastStreamInf && lastStreamUrl) {
-                modified.push(lastStreamInf);
-                modified.push(lastStreamUrl);
-            }
-        }
-
-        if (modified.length < 3) {
-            // Not enough content â€” return original
-            return stream;
-        }
-
-        var modifiedM3u8 = modified.join("\n");
-
-        // Check if data: URIs are feasible (NuvioMobile/MPVKit supports them)
-        // Encode as base64 data: URI
-        var base64 = null;
-        try {
-            if (typeof btoa === "function") {
-                base64 = btoa(modifiedM3u8);
-            } else if (typeof Buffer !== "undefined") {
-                base64 = Buffer.from(modifiedM3u8, "binary").toString("base64");
-            }
-        } catch (e) {
-            // btoa can fail with non-ASCII chars â€” use unescape trick
-            try {
-                base64 = btoa(unescape(encodeURIComponent(modifiedM3u8)));
-            } catch (e2) {
-                base64 = null;
-            }
-        }
-
-        if (!base64) {
-            return stream;
-        }
-
-        var dataUri = "data:application/vnd.apple.mpegurl;base64," + base64;
-
-        console.log('[NetMirror] Optimized m3u8: stripped to 480p only (' + modifiedM3u8.length + ' bytes â†’ data: URI)');
-
-        // Return modified stream with data: URI
-        var optimized = {
-            name: stream.name,
-            title: stream.title,
-            url: dataUri,
-            quality: "480p",
-            headers: stream.headers
-        };
-        return optimized;
-    }).catch(function(error) {
-        console.log('[NetMirror] m3u8 optimization failed, using original:', error.message);
-        return stream;
-    });
 }
 
 // Fetch streams from a platform
@@ -587,29 +454,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
 
                     if (platformsChecked === platforms.length) {
                         console.log('[NetMirror] Total streams found: ' + foundStreams.length);
-
-                        // FIX #8: Optimize each stream to avoid video CDN rate limiting.
-                        // This fetches each master m3u8, strips to 480p only, and returns
-                        // a data: URI. Runs in parallel for all streams.
-                        var optimizePromises = foundStreams.map(function(s) {
-                            return optimizeStreamForRateLimit(s);
-                        });
-                        Promise.all(optimizePromises).then(function(optimized) {
-                            // Remove the _referer internal field from each stream
-                            var clean = optimized.map(function(s) {
-                                if (s && s._referer) {
-                                    var copy = {};
-                                    for (var k in s) {
-                                        if (k !== "_referer") copy[k] = s[k];
-                                    }
-                                    return copy;
-                                }
-                                return s;
-                            });
-                            resolve(clean);
-                        }).catch(function(e) {
-                            resolve(foundStreams);
-                        });
+                        resolve(foundStreams);
                     }
                 }).catch(function(error) {
                     console.error('[NetMirror] Error on ' + platformKey + ':', error.message);
